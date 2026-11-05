@@ -8,7 +8,7 @@
   global.CloudSync = api;
 
   var token = null, user = null, family = null, myRole = null, members = [];
-  var opts = null, lastSynced = {}, pushTimer = null, pendingState = null, retryTimer = null, pendingEmail = '';
+  var opts = null, lastSynced = {}, baseTimes = {}, pushTimer = null, pendingState = null, retryTimer = null, pendingEmail = '';
 
   function $(id) { return document.getElementById(id); }
   function esc(s) {
@@ -64,6 +64,7 @@
       if (!j || !j.ok) {
         var e = new Error((j && j.error) || 'Something went wrong. Please try again.');
         e.needsConfirm = !!(j && j.needsConfirm);
+        e.conflict = !!(j && j.conflict);
         e.signedOut = /sign in again/i.test(e.message);
         throw e;
       }
@@ -79,7 +80,7 @@
     var titles = { reset: 'Reset password', recover: 'Enter the code and a new password', confirm: 'Enter your confirmation code' };
     var html = '<div class="auth-card"><h2>Family Information Book</h2>';
     if (mode === 'signin' || mode === 'signup') {
-      html += '<p class="hint">Sign in to open your family’s book. Each family’s data is private to its members.</p>' +
+      html += '<p class="hint">Sign in to open your family’s book. The records are stored in a Google Sheet that the app’s owner can open. Use it only with people you trust.</p>' +
         '<div class="auth-tabs"><button type="button" data-act="mode" data-mode="signin" class="' + (!isUp ? 'on' : '') + '">Sign in</button>' +
         '<button type="button" data-act="mode" data-mode="signup" class="' + (isUp ? 'on' : '') + '">Create account</button></div>';
     } else {
@@ -152,7 +153,7 @@
       var g = await call('getFamily');
       family = g.family; myRole = g.role; members = g.members || [];
       var s = buildState(g.data);
-      lastSynced = snapshot(s);
+      lastSynced = snapshot(s); baseTimes = g.times || {};
       writeCache(s);
       finishOpen(s, '');
     } catch (err) {
@@ -189,16 +190,26 @@
     try {
       for (var i = 0; i < changed.length; i++) {
         var id = changed[i];
-        await call('saveBlock', { blockId: id, data: JSON.parse(snap[id]) });
+        var res = await call('saveBlock', { blockId: id, data: JSON.parse(snap[id]), baseUpdatedAt: baseTimes[id] || 0 });
         lastSynced[id] = snap[id];
+        baseTimes[id] = res.savedAt;
       }
       if (pendingState === s) pendingState = null;
       syncMsg('All changes saved at ' + new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) + '.');
     } catch (err) {
+      if (err.conflict) { takeLatest(err.message); return; }
       syncMsg(err.message + ' Your changes are kept and will be saved when it works again.', true);
       clearTimeout(retryTimer);
       retryTimer = setTimeout(flush, 15000);
     }
+  }
+
+  // Someone else saved first: show their version and do not overwrite it.
+  async function takeLatest(message) {
+    pendingState = null;
+    clearTimeout(retryTimer);
+    try { await api.refresh(); } catch (e) {}
+    syncMsg(message, true);
   }
 
   api.refresh = async function () {
@@ -207,7 +218,7 @@
       var g = await call('getFamily');
       family = g.family; myRole = g.role; members = g.members || [];
       var s = buildState(g.data);
-      lastSynced = snapshot(s);
+      lastSynced = snapshot(s); baseTimes = g.times || {};
       writeCache(s);
       opts.setState(s); opts.render(); showBar();
       syncMsg('Up to date.');
