@@ -11,7 +11,7 @@ var HEAD = {
   Sessions: ['token_hash', 'email', 'expires_at'],
   Requests: ['request_id', 'family_id', 'email', 'name', 'token_hash', 'status', 'created_at', 'expires_at']
 };
-var BLOCK_IDS = ['me','family','contacts','keys','bank','fd','inv','ins','prop','veh','loan','bill','docs','nom','other','medical','dig','plan','checks','keycheck'];
+var BLOCK_IDS = ['me','family','contacts','keys','bank','fd','inv','ins','prop','veh','loan','bill','docs','nom','other','medical','dig','plan','checks','keycheck','recovery'];
 var MAX_CELL = 45000;          // Google Sheets allows about 50,000 characters per cell
 var SESSION_DAYS = 30;
 var CODE_MINUTES = 15;
@@ -134,7 +134,7 @@ function login(b) {
   var email = cleanEmail(b.email);
   var u = findUser(email);
   if (!u) fail('Email or password is not correct.');
-  if (u.obj.fails >= 10) fail('Too many wrong attempts. Use "Forgot password" to set a new one.');
+  if (u.obj.fails >= 5) fail('Too many wrong attempts. Use "Forgot password" to set a new one.');
   if (!isNewScheme(u)) fail('Your account needs a one-time password update. Use "Forgot password" to set a new password.');
   if (!authMatches(u, b.auth)) {
     updateRow(SHEET.users, u.row, { fails: Number(u.obj.fails || 0) + 1 });
