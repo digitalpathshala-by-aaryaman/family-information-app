@@ -10,7 +10,7 @@ var HEAD = {
   Data: ['family_id', 'block_id', 'json', 'updated_by', 'updated_at'],
   Sessions: ['token_hash', 'email', 'expires_at']
 };
-var BLOCK_IDS = ['me','family','contacts','keys','bank','fd','inv','ins','prop','veh','loan','bill','docs','nom','other','medical','dig','plan','checks'];
+var BLOCK_IDS = ['me','family','contacts','keys','bank','fd','inv','ins','prop','veh','loan','bill','docs','nom','other','medical','dig','plan','checks','keycheck'];
 var MAX_CELL = 45000;          // Google Sheets allows about 50,000 characters per cell
 var SESSION_DAYS = 30;
 var CODE_MINUTES = 15;
