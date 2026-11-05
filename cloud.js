@@ -5,7 +5,9 @@
   'use strict';
   var cfg = global.APP_CONFIG || {};
   var SESSION_KEY = 'fib-session', CACHE_KEY = 'fib-cache';
-  var KEYCHECK = 'keycheck', CHECK_TEXT = 'family-book-check', PBKDF2_ITER = 200000;
+  var KEYCHECK = 'keycheck', RECOVERY = 'recovery', CHECK_TEXT = 'family-book-check', PBKDF2_ITER = 200000;
+  var MIN_PASS = 12, MIN_PASSWORD = 8;
+  var CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   var api = { configured: !!cfg.APPS_SCRIPT_URL, active: false, start: null, push: null, refresh: null };
   global.CloudSync = api;
 
@@ -96,7 +98,7 @@
   async function decryptAll(data, key) {
     var out = {}, legacy = false;
     for (var id of Object.keys(data || {})) {
-      if (id === KEYCHECK) continue;
+      if (id === KEYCHECK || id === RECOVERY) continue;
       var v = data[id];
       if (v && v.enc === 1) out[id] = await openValue(key, v);
       else { out[id] = v; legacy = true; }
@@ -120,12 +122,19 @@
     return b64(new Uint8Array(bits));
   }
 
-  function downloadJson(name, obj) {
-    var blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob); a.download = name;
-    document.body.appendChild(a); a.click();
-    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  /* ---------- recovery code ----------
+     A random 16-character code, shown once. The family passphrase is stored encrypted under this code,
+     so the code can unlock the book if the passphrase is forgotten. The code itself is never stored. */
+  function newRecoveryCode() {
+    var bytes = crypto.getRandomValues(new Uint8Array(16)), out = '';
+    for (var i = 0; i < 16; i++) out += CODE_CHARS.charAt(bytes[i] & 31); // 32 characters, so no bias
+    return out.slice(0, 4) + '-' + out.slice(4, 8) + '-' + out.slice(8, 12) + '-' + out.slice(12, 16);
+  }
+  function normCode(c) { return String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+  function recoveryKey(code, familyId) { return deriveKey(normCode(code), familyId + ':recovery'); }
+  async function sealRecovery(code, pass, familyId) {
+    var key = await recoveryKey(code, familyId);
+    return sealValue(key, { p: pass });
   }
 
   /* ---------- talking to the server ---------- */
@@ -223,17 +232,18 @@
       inner = '<p class="hint">The family admin needs to sign in once to set the family passphrase. After that, you can open the book with it.</p>';
     } else if (!hasCheck) {
       inner = '<h3>Set the family passphrase</h3>' +
-        '<p class="hint">This passphrase locks your family’s records. Share it with every family member, in person. If it is lost, the records cannot be recovered.</p>' +
+        '<p class="hint">This passphrase locks your family’s records. Share it with every family member, in person. You will also get a recovery code, so you can get back in if the passphrase is forgotten.</p>' +
         '<form id="key-form" data-mode="create" novalidate>' +
-        '<label class="fld"><span>Family passphrase (at least 8 characters)</span><input name="pass" type="password" autocomplete="new-password" minlength="8" required></label>' +
-        '<label class="fld"><span>Type it again</span><input name="pass2" type="password" autocomplete="new-password" minlength="8" required></label>' +
+        '<label class="fld"><span>Family passphrase (at least ' + MIN_PASS + ' characters)</span><input name="pass" type="password" autocomplete="new-password" minlength="' + MIN_PASS + '" required></label>' +
+        '<label class="fld"><span>Type it again</span><input name="pass2" type="password" autocomplete="new-password" minlength="' + MIN_PASS + '" required></label>' +
         '<button type="submit" class="auth-go">Save passphrase</button></form>';
     } else {
       inner = '<h3>Enter the family passphrase</h3>' +
         '<p class="hint">Ask your family admin for the passphrase. It is kept only on this device until you sign out.</p>' +
         '<form id="key-form" data-mode="enter" novalidate>' +
         '<label class="fld"><span>Family passphrase</span><input name="pass" type="password" autocomplete="off" required></label>' +
-        '<button type="submit" class="auth-go">Unlock</button></form>';
+        '<button type="submit" class="auth-go">Unlock</button></form>' +
+        '<p class="auth-links"><a href="#" data-act="recovery">Forgot the passphrase? Use the recovery code</a></p>';
     }
     box.innerHTML = '<div class="auth-card"><h2>Family passphrase</h2>' + inner +
       '<p class="auth-links"><a href="#" data-act="signout">Sign out</a></p>' +
@@ -242,14 +252,43 @@
     var bar = $('cloud-bar'); if (bar) bar.hidden = true;
   }
 
+  // Shows the recovery code once. The family must confirm they saved it before the book opens.
+  var pendingNext = null;
+  function showRecoveryCode(code, next) {
+    var box = $('cloud-auth');
+    pendingNext = next;
+    box.innerHTML = '<div class="auth-card"><h2>Save your recovery code</h2>' +
+      '<p class="hint">If the family passphrase is ever forgotten, this code gets you back into the book. Write it down and keep it somewhere safe, for example with a trusted family member. It is shown only once.</p>' +
+      '<p class="recovery-code"><b>' + esc(code) + '</b></p>' +
+      '<form id="recovery-code-form" novalidate>' +
+      '<label class="fld check"><input name="saved" type="checkbox" required> <span>I have saved this recovery code</span></label>' +
+      '<button type="submit" class="auth-go">Continue</button></form>' +
+      '<p id="auth-msg" class="auth-msg" role="status"></p></div>';
+    box.hidden = false;
+    var bar = $('cloud-bar'); if (bar) bar.hidden = true;
+  }
+
+  function showRecoveryEntry() {
+    var box = $('cloud-auth');
+    box.innerHTML = '<div class="auth-card"><h2>Use the recovery code</h2>' +
+      '<p class="hint">Enter the recovery code you were given when the passphrase was set. You will be able to open the book again.</p>' +
+      '<form id="recovery-form" novalidate>' +
+      '<label class="fld"><span>Recovery code</span><input name="code" autocomplete="off" autocapitalize="characters" required maxlength="24"></label>' +
+      '<button type="submit" class="auth-go">Open the book</button></form>' +
+      '<p class="auth-links"><a href="#" data-act="back">Back</a></p>' +
+      '<p id="auth-msg" class="auth-msg" role="status"></p></div>';
+    box.hidden = false;
+    var bar = $('cloud-bar'); if (bar) bar.hidden = true;
+  }
+
   function showChangePass() {
     var box = $('cloud-auth');
     box.innerHTML = '<div class="auth-card"><h2>Change the family passphrase</h2>' +
-      '<p class="hint">Every section is re-encrypted with the new passphrase. Keep this page open until it finishes. Other members will be asked for the new passphrase on their next visit. Save a backup first if you can.</p>' +
+      '<p class="hint">Every section is re-encrypted with the new passphrase, and you will get a new recovery code. Keep this page open until it finishes. Other members will be asked for the new passphrase on their next visit.</p>' +
       '<form id="changepass-form" novalidate>' +
       '<label class="fld"><span>Current passphrase</span><input name="oldp" type="password" autocomplete="off" required></label>' +
-      '<label class="fld"><span>New passphrase (at least 8 characters)</span><input name="newp" type="password" autocomplete="new-password" minlength="8" required></label>' +
-      '<label class="fld"><span>Type the new passphrase again</span><input name="newp2" type="password" autocomplete="new-password" minlength="8" required></label>' +
+      '<label class="fld"><span>New passphrase (at least ' + MIN_PASS + ' characters)</span><input name="newp" type="password" autocomplete="new-password" minlength="' + MIN_PASS + '" required></label>' +
+      '<label class="fld"><span>Type the new passphrase again</span><input name="newp2" type="password" autocomplete="new-password" minlength="' + MIN_PASS + '" required></label>' +
       '<button type="submit" class="auth-go">Change passphrase</button></form>' +
       '<p class="auth-links"><a href="#" data-act="back">Cancel</a></p>' +
       '<p id="auth-msg" class="auth-msg" role="status"></p></div>';
@@ -366,10 +405,41 @@
     var key = await deriveKey(pass, family.id);
     var env = await sealValue(key, CHECK_TEXT);
     var res = await call('saveBlock', { blockId: KEYCHECK, data: env, baseUpdatedAt: baseTimes[KEYCHECK] || 0 });
-    baseTimes[KEYCHECK] = res.savedAt;
-    g.data = g.data || {};
-    g.data[KEYCHECK] = env;
-    await unlock(pass, g);
+    g.data = g.data || {}; g.times = Object.assign({}, g.times || {});
+    g.data[KEYCHECK] = env; g.times[KEYCHECK] = res.savedAt;
+    var code = newRecoveryCode();
+    var renv = await sealRecovery(code, pass, family.id);
+    var rr = await call('saveBlock', { blockId: RECOVERY, data: renv, baseUpdatedAt: (g.times[RECOVERY] || 0) });
+    g.data[RECOVERY] = renv; g.times[RECOVERY] = rr.savedAt;
+    // The book opens only after the family confirms they saved the recovery code.
+    showRecoveryCode(code, function () { return unlock(pass, g); });
+  }
+
+  async function handleRecoveryCodeSaved(form) {
+    var msg = function (t) { var el = $('auth-msg'); if (el) el.textContent = t; };
+    if (!form.elements.saved.checked) { msg('Tick the box once you have saved the code.'); return; }
+    var next = pendingNext; pendingNext = null;
+    msg('Please wait…');
+    try { if (next) await next(); } catch (err) { msg(err.message); }
+  }
+
+  // Opens the book with the recovery code: the stored passphrase is decrypted, then used like a normal unlock.
+  async function handleRecovery(form) {
+    var msg = function (t) { var el = $('auth-msg'); if (el) el.textContent = t; };
+    var g = pendingOpen;
+    if (!g || !family) { msg('Please sign in again.'); return; }
+    var env = g.data && g.data[RECOVERY];
+    if (!env || env.enc !== 1) { msg('This family has no recovery code yet. The admin can create one by changing the passphrase.'); return; }
+    msg('Please wait…');
+    var pass = null;
+    try {
+      var key = await recoveryKey(fieldVal(form, 'code'), family.id);
+      var opened = await openValue(key, env);
+      pass = opened && opened.p;
+    } catch (e) { pass = null; }
+    if (!pass) { msg('That recovery code is not correct.'); return; }
+    try { await unlock(pass, g); }
+    catch (err) { msg('The passphrase could not be restored from this code. Ask the family admin to change the passphrase.'); }
   }
 
   // The passphrase was changed by the admin: forget the old one and ask for the new one.
@@ -505,7 +575,7 @@
   async function handleKey(form) {
     var msg = function (t) { var el = $('auth-msg'); if (el) el.textContent = t; };
     var mode = form.dataset.mode, pass = form.elements.pass.value;
-    if (pass.length < 8) { msg('Use at least 8 characters.'); return; }
+    if (pass.length < MIN_PASS) { msg('Use at least ' + MIN_PASS + ' characters.'); return; }
     if (mode === 'create' && form.elements.pass2.value !== pass) { msg('The two passphrases do not match.'); return; }
     msg('Please wait…');
     try {
@@ -517,7 +587,7 @@
   async function handleChangePass(form) {
     var msg = function (t) { var el = $('auth-msg'); if (el) el.textContent = t; };
     var oldP = form.elements.oldp.value, newP = form.elements.newp.value, newP2 = form.elements.newp2.value;
-    if (newP.length < 8) { msg('Use at least 8 characters for the new passphrase.'); return; }
+    if (newP.length < MIN_PASS) { msg('Use at least ' + MIN_PASS + ' characters for the new passphrase.'); return; }
     if (newP !== newP2) { msg('The two new passphrases do not match.'); return; }
     if (newP === oldP) { msg('Choose a different passphrase.'); return; }
     msg('Please wait. Keep this page open…');
@@ -529,8 +599,6 @@
       if (check !== CHECK_TEXT) throw new Error('The current passphrase is not correct.');
       var res = await decryptAll(g.data, oldKey);
       var state = buildState(res.data);
-      // Keep a copy on the device in case something goes wrong part way.
-      downloadJson('family-book-before-passphrase-change.json', state);
       var newKey = await deriveKey(newP, family.id);
       var times = Object.assign({}, g.times || {});
       var ids = BLOCKS.map(function (b) { return b.id; }).concat(['checks']);
@@ -544,15 +612,22 @@
       var checkEnv = await sealValue(newKey, CHECK_TEXT);
       var rc = await call('saveBlock', { blockId: KEYCHECK, data: checkEnv, baseUpdatedAt: times[KEYCHECK] || 0 });
       times[KEYCHECK] = rc.savedAt;
+      // A new recovery code goes with the new passphrase. The old code no longer opens the book.
+      var code = newRecoveryCode();
+      var renv = await sealRecovery(code, newP, family.id);
+      var rr = await call('saveBlock', { blockId: RECOVERY, data: renv, baseUpdatedAt: times[RECOVERY] || 0 });
+      times[RECOVERY] = rr.savedAt;
       keyObj = newKey;
       storePass(family.id, newP);
       baseTimes = times;
       lastSynced = snapshot(state);
       writeCache(state);
-      hideAuth(); showBar();
-      syncMsg('Passphrase changed. Other members will be asked for the new one.');
+      showRecoveryCode(code, function () {
+        hideAuth(); showBar();
+        syncMsg('Passphrase changed. Other members will be asked for the new one.');
+      });
     } catch (err) {
-      msg(err.message + ' If this keeps happening, use Restore backup with the file that was downloaded.');
+      msg(err.message);
     }
   }
 
@@ -579,6 +654,8 @@
     if (f.id === 'create-form') { e.preventDefault(); handleSetup(f, 'create'); }
     if (f.id === 'join-form') { e.preventDefault(); handleSetup(f, 'join'); }
     if (f.id === 'key-form') { e.preventDefault(); handleKey(f); }
+    if (f.id === 'recovery-code-form') { e.preventDefault(); handleRecoveryCodeSaved(f); }
+    if (f.id === 'recovery-form') { e.preventDefault(); handleRecovery(f); }
     if (f.id === 'changepass-form') { e.preventDefault(); handleChangePass(f); }
     if (f.id === 'delete-form') { e.preventDefault(); handleDelete(f); }
   });
@@ -638,6 +715,7 @@
       return;
     }
     if (act === 'changepass') { showChangePass(); return; }
+    if (act === 'recovery') { showRecoveryEntry(); return; }
     if (act === 'delacct') { showDeleteAccount(); return; }
   });
 
