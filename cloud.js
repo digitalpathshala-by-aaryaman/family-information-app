@@ -1,14 +1,17 @@
 /* Family sign-in and sync through a Google Apps Script web app (Code.gs), which keeps its data in a Google Sheet.
+   Section data is encrypted in the browser with a family passphrase before it is sent, so the sheet only holds scrambled text.
    Active only when config.js holds the Web app URL. Without it the app runs on this device only. */
 (function (global) {
   'use strict';
   var cfg = global.APP_CONFIG || {};
   var SESSION_KEY = 'fib-session', CACHE_KEY = 'fib-cache';
+  var KEYCHECK = 'keycheck', CHECK_TEXT = 'family-book-check', PBKDF2_ITER = 200000;
   var api = { configured: !!cfg.APPS_SCRIPT_URL, active: false, start: null, push: null, refresh: null };
   global.CloudSync = api;
 
   var token = null, user = null, family = null, myRole = null, members = [];
   var opts = null, lastSynced = {}, baseTimes = {}, pushTimer = null, pendingState = null, retryTimer = null, pendingEmail = '';
+  var keyObj = null, pendingOpen = null;
 
   function $(id) { return document.getElementById(id); }
   function esc(s) {
@@ -48,6 +51,50 @@
   function writeCache(s) { try { localStorage.setItem(CACHE_KEY, JSON.stringify(s)); } catch (e) {} }
   function readCache() { try { var r = localStorage.getItem(CACHE_KEY); return r ? buildState(JSON.parse(r)) : null; } catch (e) { return null; } }
   function saveToken(t) { token = t; try { if (t) localStorage.setItem(SESSION_KEY, t); else localStorage.removeItem(SESSION_KEY); } catch (e) {} }
+  function passKey(fid) { return 'fib-key:' + fid; }
+  function readPass(fid) { try { return localStorage.getItem(passKey(fid)) || ''; } catch (e) { return ''; } }
+  function storePass(fid, p) { try { localStorage.setItem(passKey(fid), p); } catch (e) {} }
+  function clearPass(fid) { try { localStorage.removeItem(passKey(fid)); } catch (e) {} }
+
+  /* ---------- encryption (runs in the browser; the server never sees the passphrase or the key) ---------- */
+  function b64(bytes) {
+    var s = '';
+    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s);
+  }
+  function unb64(str) {
+    var s = atob(str), out = new Uint8Array(s.length);
+    for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+    return out;
+  }
+  async function deriveKey(pass, familyId) {
+    var enc = new TextEncoder();
+    var base = await crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey(
+      { name: 'PBKDF2', hash: 'SHA-256', salt: enc.encode('family-book-v1:' + familyId), iterations: PBKDF2_ITER },
+      base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  }
+  async function sealValue(key, value) {
+    var iv = crypto.getRandomValues(new Uint8Array(12));
+    var pt = new TextEncoder().encode(JSON.stringify(value));
+    var ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, pt);
+    return { enc: 1, iv: b64(iv), ct: b64(new Uint8Array(ct)) };
+  }
+  async function openValue(key, env) {
+    var pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(env.iv) }, key, unb64(env.ct));
+    return JSON.parse(new TextDecoder().decode(pt));
+  }
+  // Decrypts every section. Sections saved before encryption existed are plain and get re-saved encrypted.
+  async function decryptAll(data, key) {
+    var out = {}, legacy = false;
+    for (var id of Object.keys(data || {})) {
+      if (id === KEYCHECK) continue;
+      var v = data[id];
+      if (v && v.enc === 1) out[id] = await openValue(key, v);
+      else { out[id] = v; legacy = true; }
+    }
+    return { data: out, legacy: legacy };
+  }
 
   /* ---------- talking to the server ---------- */
   function call(action, body) {
@@ -80,7 +127,7 @@
     var titles = { reset: 'Reset password', recover: 'Enter the code and a new password', confirm: 'Enter your confirmation code' };
     var html = '<div class="auth-card"><h2>Family Information Book</h2>';
     if (mode === 'signin' || mode === 'signup') {
-      html += '<p class="hint">Sign in to open your family’s book. The records are stored in a Google Sheet that the app’s owner can open. Use it only with people you trust.</p>' +
+      html += '<p class="hint">Sign in to open your family’s book. Your records are encrypted on this device before they are saved. The Google Sheet only holds scrambled text.</p>' +
         '<div class="auth-tabs"><button type="button" data-act="mode" data-mode="signin" class="' + (!isUp ? 'on' : '') + '">Sign in</button>' +
         '<button type="button" data-act="mode" data-mode="signup" class="' + (isUp ? 'on' : '') + '">Create account</button></div>';
     } else {
@@ -123,6 +170,35 @@
     var bar = $('cloud-bar'); if (bar) bar.hidden = true;
   }
 
+  // Asks for the family passphrase. The admin sets it once; everyone else enters it.
+  function showKeyScreen(g) {
+    var box = $('cloud-auth');
+    if (!box) return;
+    var hasCheck = !!(g.data && g.data[KEYCHECK] && g.data[KEYCHECK].enc === 1);
+    var inner;
+    if (!hasCheck && myRole !== 'admin') {
+      inner = '<p class="hint">The family admin needs to sign in once to set the family passphrase. After that, you can open the book with it.</p>';
+    } else if (!hasCheck) {
+      inner = '<h3>Set the family passphrase</h3>' +
+        '<p class="hint">This passphrase locks your family’s records. The Google Sheet only holds scrambled text. Share this passphrase with every family member, in person. If it is lost, the records cannot be recovered.</p>' +
+        '<form id="key-form" data-mode="create" novalidate>' +
+        '<label class="fld"><span>Family passphrase (at least 8 characters)</span><input name="pass" type="password" autocomplete="new-password" minlength="8" required></label>' +
+        '<label class="fld"><span>Type it again</span><input name="pass2" type="password" autocomplete="new-password" minlength="8" required></label>' +
+        '<button type="submit" class="auth-go">Save passphrase</button></form>';
+    } else {
+      inner = '<h3>Enter the family passphrase</h3>' +
+        '<p class="hint">Ask your family admin for the passphrase. It is kept only on this device until you sign out.</p>' +
+        '<form id="key-form" data-mode="enter" novalidate>' +
+        '<label class="fld"><span>Family passphrase</span><input name="pass" type="password" autocomplete="off" required></label>' +
+        '<button type="submit" class="auth-go">Unlock</button></form>';
+    }
+    box.innerHTML = '<div class="auth-card"><h2>Family passphrase</h2>' + inner +
+      '<p class="auth-links"><a href="#" data-act="signout">Sign out</a></p>' +
+      '<p id="auth-msg" class="auth-msg" role="status"></p></div>';
+    box.hidden = false;
+    var bar = $('cloud-bar'); if (bar) bar.hidden = true;
+  }
+
   function hideAuth() { var box = $('cloud-auth'); if (box) { box.hidden = true; box.innerHTML = ''; } }
 
   function showBar() {
@@ -152,14 +228,17 @@
       if (!me.family) { showFamilySetup(); return; }
       var g = await call('getFamily');
       family = g.family; myRole = g.role; members = g.members || [];
-      var s = buildState(g.data);
-      lastSynced = snapshot(s); baseTimes = g.times || {};
-      writeCache(s);
-      finishOpen(s, '');
+      pendingOpen = g;
+      var saved = readPass(family.id);
+      if (saved) {
+        try { await unlock(saved, g); return; }
+        catch (e) { if (/not correct/.test(e.message)) clearPass(family.id); }
+      }
+      showKeyScreen(g);
     } catch (err) {
       if (err.signedOut) { saveToken(null); showAuth('signin', 'Please sign in again.'); return; }
       var cached = readCache();
-      if (cached && family) { finishOpen(cached, 'Offline: showing the last saved copy on this device.'); return; }
+      if (cached && family && keyObj) { finishOpen(cached, 'Offline: showing the last saved copy on this device.'); return; }
       showAuth('signin', err.message);
     }
   }
@@ -173,9 +252,39 @@
     syncMsg(note || 'Signed in. Changes save automatically.', !!note);
   }
 
+  // Checks the passphrase against the family check value, then loads the book.
+  async function unlock(pass, g) {
+    var key = await deriveKey(pass, family.id);
+    var kc = g.data && g.data[KEYCHECK];
+    if (!kc || kc.enc !== 1) throw new Error('The family admin needs to sign in once to set the family passphrase.');
+    var check = null;
+    try { check = await openValue(key, kc); } catch (e) { check = null; }
+    if (check !== CHECK_TEXT) throw new Error('That passphrase is not correct for this family.');
+    var res = await decryptAll(g.data, key);
+    keyObj = key;
+    storePass(family.id, pass);
+    var s = buildState(res.data);
+    baseTimes = g.times || {};
+    lastSynced = res.legacy ? {} : snapshot(s);
+    writeCache(s);
+    finishOpen(s, '');
+    if (res.legacy) api.push(s);
+  }
+
+  // Admin sets the passphrase for the first time.
+  async function createPassphrase(pass, g) {
+    var key = await deriveKey(pass, family.id);
+    var env = await sealValue(key, CHECK_TEXT);
+    var res = await call('saveBlock', { blockId: KEYCHECK, data: env, baseUpdatedAt: baseTimes[KEYCHECK] || 0 });
+    baseTimes[KEYCHECK] = res.savedAt;
+    g.data = g.data || {};
+    g.data[KEYCHECK] = env;
+    await unlock(pass, g);
+  }
+
   /* ---------- saving ---------- */
   api.push = function (s) {
-    if (!api.active) return;
+    if (!api.active || !keyObj) return;
     pendingState = s;
     writeCache(s);
     clearTimeout(pushTimer);
@@ -183,14 +292,15 @@
   };
 
   async function flush() {
-    if (!pendingState || !api.active) return;
+    if (!pendingState || !api.active || !keyObj) return;
     var s = pendingState, snap = snapshot(s);
     var changed = BLOCKS.map(function (b) { return b.id; }).concat(['checks']).filter(function (id) { return snap[id] !== lastSynced[id]; });
     if (!changed.length) { pendingState = null; return; }
     try {
       for (var i = 0; i < changed.length; i++) {
         var id = changed[i];
-        var res = await call('saveBlock', { blockId: id, data: JSON.parse(snap[id]), baseUpdatedAt: baseTimes[id] || 0 });
+        var env = await sealValue(keyObj, JSON.parse(snap[id]));
+        var res = await call('saveBlock', { blockId: id, data: env, baseUpdatedAt: baseTimes[id] || 0 });
         lastSynced[id] = snap[id];
         baseTimes[id] = res.savedAt;
       }
@@ -213,11 +323,12 @@
   }
 
   api.refresh = async function () {
-    if (!api.active || pendingState) return;
+    if (!api.active || pendingState || !keyObj) return;
     try {
       var g = await call('getFamily');
       family = g.family; myRole = g.role; members = g.members || [];
-      var s = buildState(g.data);
+      var res = await decryptAll(g.data, keyObj);
+      var s = buildState(res.data);
       lastSynced = snapshot(s); baseTimes = g.times || {};
       writeCache(s);
       opts.setState(s); opts.render(); showBar();
@@ -227,9 +338,11 @@
 
   async function signOut() {
     try { await call('logout'); } catch (e) {}
+    if (family) clearPass(family.id);
     saveToken(null);
     try { localStorage.removeItem(CACHE_KEY); } catch (e) {}
     user = null; family = null; members = []; api.active = false; pendingState = null;
+    keyObj = null; pendingOpen = null;
     opts.setState(blankState()); opts.render();
     var clear = $('clear-btn'); if (clear) clear.hidden = false;
     showAuth('signin');
@@ -283,12 +396,25 @@
     } catch (err) { msg(err.message); }
   }
 
+  async function handleKey(form) {
+    var msg = function (t) { var el = $('auth-msg'); if (el) el.textContent = t; };
+    var mode = form.dataset.mode, pass = form.elements.pass.value;
+    if (pass.length < 8) { msg('Use at least 8 characters.'); return; }
+    if (mode === 'create' && form.elements.pass2.value !== pass) { msg('The two passphrases do not match.'); return; }
+    msg('Please wait…');
+    try {
+      if (mode === 'create') await createPassphrase(pass, pendingOpen);
+      else await unlock(pass, pendingOpen);
+    } catch (err) { msg(err.message); }
+  }
+
   document.addEventListener('submit', function (e) {
     if (!api.configured) return;
     var f = e.target;
     if (f.id === 'auth-form') { e.preventDefault(); handleAuth(f); }
     if (f.id === 'create-form') { e.preventDefault(); handleSetup(f, 'create'); }
     if (f.id === 'join-form') { e.preventDefault(); handleSetup(f, 'join'); }
+    if (f.id === 'key-form') { e.preventDefault(); handleKey(f); }
   });
 
   document.addEventListener('click', async function (e) {
@@ -331,4 +457,7 @@
     if (token) openFamily();
     else showAuth('signin');
   };
+
+  // Used by tests only.
+  api._crypto = { deriveKey: deriveKey, sealValue: sealValue, openValue: openValue, decryptAll: decryptAll, KEYCHECK: KEYCHECK, CHECK_TEXT: CHECK_TEXT };
 })(typeof window !== 'undefined' ? window : globalThis);
