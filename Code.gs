@@ -189,11 +189,12 @@ function getFamily(b) {
     var u = findUser(r.obj.email);
     return { email: r.obj.email, name: u ? u.obj.name : 'Family member', role: r.obj.role, me: r.obj.email === s.email };
   });
-  var data = {};
+  var data = {}, times = {};
   rowsWhere(SHEET.data, { family_id: fid }).forEach(function (r) {
     try { data[r.obj.block_id] = JSON.parse(r.obj.json); } catch (e) {}
+    times[r.obj.block_id] = Number(r.obj.updated_at) || 0;
   });
-  return { ok: true, family: { id: fid, name: m.family.name, join_code: m.family.join_code }, role: m.member.role, members: members, data: data };
+  return { ok: true, family: { id: fid, name: m.family.name, join_code: m.family.join_code }, role: m.member.role, members: members, data: data, times: times };
 }
 
 function saveBlock(b) {
@@ -206,9 +207,15 @@ function saveBlock(b) {
   if (json.length > MAX_CELL) fail('This section has too many entries for one save. Remove a few rows or split them.');
   var fid = m.family.family_id;
   var row = findRow(SHEET.data, { family_id: fid, block_id: block });
-  var rec = { family_id: fid, block_id: block, json: json, updated_by: s.email, updated_at: Date.now() };
+  // Refuse to overwrite a section that someone else changed after this device last loaded it.
+  var base = Number(b.baseUpdatedAt) || 0;
+  if (row && Number(row.obj.updated_at) > base) {
+    return { ok: false, conflict: true, error: 'Someone in your family changed this section first, so your last change was not saved. The latest version is now shown. Please enter your change again.' };
+  }
+  var now = Date.now();
+  var rec = { family_id: fid, block_id: block, json: json, updated_by: s.email, updated_at: now };
   if (row) updateRow(SHEET.data, row.row, rec); else appendRow(SHEET.data, rec);
-  return { ok: true, savedAt: Date.now() };
+  return { ok: true, savedAt: now };
 }
 
 function newCode(b) {
