@@ -2,7 +2,7 @@
 // Keeps the app shell on the device so the book opens fast and works offline.
 // Your family data is never cached here: it is stored by the database and on-device cache.
 // Bump VERSION when a shell file changes so every device fetches the new files.
-const VERSION = 'v2';
+const VERSION = 'v4';
 const CACHE = 'family-book-' + VERSION;
 const SHELL = [
   './',
