@@ -1,0 +1,323 @@
+/* Family sign-in and sync through a Google Apps Script web app (Code.gs), which keeps its data in a Google Sheet.
+   Active only when config.js holds the Web app URL. Without it the app runs on this device only. */
+(function (global) {
+  'use strict';
+  var cfg = global.APP_CONFIG || {};
+  var SESSION_KEY = 'fib-session', CACHE_KEY = 'fib-cache';
+  var api = { configured: !!cfg.APPS_SCRIPT_URL, active: false, start: null, push: null, refresh: null };
+  global.CloudSync = api;
+
+  var token = null, user = null, family = null, myRole = null, members = [];
+  var opts = null, lastSynced = {}, pushTimer = null, pendingState = null, retryTimer = null, pendingEmail = '';
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function syncMsg(text, isErr) {
+    var el = $('status');
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = isErr ? 'var(--danger)' : '';
+  }
+  function blankState() {
+    var s = { checks: {} };
+    BLOCKS.forEach(function (b) { s[b.id] = b.kind === 'single' ? {} : []; });
+    return s;
+  }
+  function validShape(b, v) {
+    return b.kind === 'single' ? (v && typeof v === 'object' && !Array.isArray(v)) : Array.isArray(v);
+  }
+  function snapshot(s) {
+    var out = {};
+    BLOCKS.forEach(function (b) { out[b.id] = JSON.stringify(s[b.id]); });
+    out.checks = JSON.stringify(s.checks || {});
+    return out;
+  }
+  function buildState(data) {
+    var s = blankState();
+    Object.keys(data || {}).forEach(function (id) {
+      if (id === 'checks') { if (data.checks && typeof data.checks === 'object') s.checks = data.checks; return; }
+      var b = BLOCKS.filter(function (x) { return x.id === id; })[0];
+      if (b && validShape(b, data[id])) s[id] = data[id];
+    });
+    return s;
+  }
+  function writeCache(s) { try { localStorage.setItem(CACHE_KEY, JSON.stringify(s)); } catch (e) {} }
+  function readCache() { try { var r = localStorage.getItem(CACHE_KEY); return r ? buildState(JSON.parse(r)) : null; } catch (e) { return null; } }
+  function saveToken(t) { token = t; try { if (t) localStorage.setItem(SESSION_KEY, t); else localStorage.removeItem(SESSION_KEY); } catch (e) {} }
+
+  /* ---------- talking to the server ---------- */
+  function call(action, body) {
+    var payload = Object.assign({ action: action }, body || {});
+    if (token) payload.token = token;
+    return fetch(cfg.APPS_SCRIPT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload)
+    }).then(function (r) { return r.json(); }, function () {
+      var e = new Error('Could not reach the family service. Check your internet connection.');
+      e.network = true; throw e;
+    }).then(function (j) {
+      if (!j || !j.ok) {
+        var e = new Error((j && j.error) || 'Something went wrong. Please try again.');
+        e.needsConfirm = !!(j && j.needsConfirm);
+        e.signedOut = /sign in again/i.test(e.message);
+        throw e;
+      }
+      return j;
+    });
+  }
+
+  /* ---------- screens ---------- */
+  function showAuth(mode, message) {
+    var box = $('cloud-auth');
+    if (!box) return;
+    var isUp = mode === 'signup';
+    var titles = { reset: 'Reset password', recover: 'Enter the code and a new password', confirm: 'Enter your confirmation code' };
+    var html = '<div class="auth-card"><h2>Family Information Book</h2>';
+    if (mode === 'signin' || mode === 'signup') {
+      html += '<p class="hint">Sign in to open your family’s book. Each family’s data is private to its members.</p>' +
+        '<div class="auth-tabs"><button type="button" data-act="mode" data-mode="signin" class="' + (!isUp ? 'on' : '') + '">Sign in</button>' +
+        '<button type="button" data-act="mode" data-mode="signup" class="' + (isUp ? 'on' : '') + '">Create account</button></div>';
+    } else {
+      html += '<h3>' + esc(titles[mode] || '') + '</h3>';
+    }
+    html += '<form id="auth-form" novalidate data-mode="' + mode + '">';
+    if (isUp) html += '<label class="fld"><span>Your full name</span><input name="name" autocomplete="name" required maxlength="80"></label>';
+    if (mode === 'recover' || mode === 'confirm') {
+      html += '<p class="hint">We sent a code to <b>' + esc(pendingEmail) + '</b>. It is valid for 15 minutes.</p>' +
+        '<label class="fld"><span>6-digit code from the email</span><input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="8" required></label>';
+    } else {
+      html += '<label class="fld"><span>Email</span><input name="email" type="email" autocomplete="email" value="' + esc(pendingEmail) + '" required></label>';
+    }
+    if (mode === 'signin' || mode === 'signup') html += '<label class="fld"><span>Password (at least 8 characters)</span><input name="password" type="password" autocomplete="' + (isUp ? 'new-password' : 'current-password') + '" minlength="8" required></label>';
+    if (mode === 'recover') html += '<label class="fld"><span>New password (at least 8 characters)</span><input name="password" type="password" autocomplete="new-password" minlength="8" required></label>';
+    var go = { signin: 'Sign in', signup: 'Create account', reset: 'Send code', recover: 'Save new password', confirm: 'Confirm' }[mode];
+    html += '<button type="submit" class="auth-go">' + go + '</button></form>';
+    if (mode === 'signin') html += '<p class="auth-links"><a href="#" data-act="mode" data-mode="reset">Forgot password?</a></p>';
+    if (mode === 'reset' || mode === 'recover') html += '<p class="auth-links"><a href="#" data-act="mode" data-mode="signin">Back to sign in</a></p>';
+    if (mode === 'recover' || mode === 'confirm') html += '<p class="auth-links"><a href="#" data-act="resend" data-mode="' + mode + '">Send a new code</a> · <a href="#" data-act="mode" data-mode="signin">Back to sign in</a></p>';
+    html += '<p id="auth-msg" class="auth-msg" role="status">' + esc(message || '') + '</p></div>';
+    box.innerHTML = html;
+    box.hidden = false;
+    var bar = $('cloud-bar'); if (bar) bar.hidden = true;
+  }
+
+  function showFamilySetup() {
+    var box = $('cloud-auth');
+    box.innerHTML = '<div class="auth-card"><h2>Set up your family</h2>' +
+      '<p class="hint">Signed in as <b>' + esc(user && user.email) + '</b>. Create a new family book, or join one your family admin has created.</p>' +
+      '<form id="create-form" class="setup-form"><h3>Create a new family</h3>' +
+      '<label class="fld"><span>Family name (for example, Sharma family)</span><input name="fname" required maxlength="80"></label>' +
+      '<button type="submit" class="auth-go">Create family</button></form>' +
+      '<form id="join-form" class="setup-form"><h3>Join a family</h3>' +
+      '<label class="fld"><span>Family code from your admin</span><input name="code" required maxlength="12" autocapitalize="characters"></label>' +
+      '<button type="submit" class="auth-go ghost">Join family</button></form>' +
+      '<p class="auth-links"><a href="#" data-act="signout">Sign out</a></p>' +
+      '<p id="auth-msg" class="auth-msg" role="status"></p></div>';
+    box.hidden = false;
+    var bar = $('cloud-bar'); if (bar) bar.hidden = true;
+  }
+
+  function hideAuth() { var box = $('cloud-auth'); if (box) { box.hidden = true; box.innerHTML = ''; } }
+
+  function showBar() {
+    var bar = $('cloud-bar');
+    if (!bar || !family) return;
+    var isAdmin = myRole === 'admin';
+    var list = members.map(function (m) {
+      var remove = (isAdmin && !m.me) ? ' <button type="button" class="row-act del" data-act="remove" data-email="' + esc(m.email) + '">Remove</button>' : '';
+      return '<li>' + esc(m.name) + (m.me ? ' (you)' : '') + ' <small>' + (m.role === 'admin' ? 'admin' : 'member') + '</small>' + remove + '</li>';
+    }).join('');
+    bar.innerHTML = '<div class="cloud-row"><div><b>' + esc(family.name) + '</b> <small>· ' + esc(user && user.email) + ' (' + (isAdmin ? 'admin' : 'member') + ')</small></div>' +
+      '<div class="cloud-actions">' +
+      '<details><summary>Members (' + members.length + ')</summary><ul class="members">' + list + '</ul>' +
+      (isAdmin ? '<p class="hint">Family code: <b class="code">' + esc(family.join_code) + '</b> <button type="button" class="row-act" data-act="newcode">New code</button></p>' : '') +
+      '</details>' +
+      '<button type="button" class="row-act" data-act="refresh">Refresh</button>' +
+      '<button type="button" class="row-act" data-act="signout">Sign out</button></div></div>';
+    bar.hidden = false;
+    var clear = $('clear-btn'); if (clear) clear.hidden = true;
+  }
+
+  /* ---------- opening a family ---------- */
+  async function openFamily() {
+    try {
+      var me = await call('me');
+      user = me.user;
+      if (!me.family) { showFamilySetup(); return; }
+      var g = await call('getFamily');
+      family = g.family; myRole = g.role; members = g.members || [];
+      var s = buildState(g.data);
+      lastSynced = snapshot(s);
+      writeCache(s);
+      finishOpen(s, '');
+    } catch (err) {
+      if (err.signedOut) { saveToken(null); showAuth('signin', 'Please sign in again.'); return; }
+      var cached = readCache();
+      if (cached && family) { finishOpen(cached, 'Offline: showing the last saved copy on this device.'); return; }
+      showAuth('signin', err.message);
+    }
+  }
+
+  function finishOpen(s, note) {
+    api.active = true;
+    opts.setState(s);
+    hideAuth();
+    showBar();
+    opts.render();
+    syncMsg(note || 'Signed in. Changes save automatically.', !!note);
+  }
+
+  /* ---------- saving ---------- */
+  api.push = function (s) {
+    if (!api.active) return;
+    pendingState = s;
+    writeCache(s);
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(flush, 500);
+  };
+
+  async function flush() {
+    if (!pendingState || !api.active) return;
+    var s = pendingState, snap = snapshot(s);
+    var changed = BLOCKS.map(function (b) { return b.id; }).concat(['checks']).filter(function (id) { return snap[id] !== lastSynced[id]; });
+    if (!changed.length) { pendingState = null; return; }
+    try {
+      for (var i = 0; i < changed.length; i++) {
+        var id = changed[i];
+        await call('saveBlock', { blockId: id, data: JSON.parse(snap[id]) });
+        lastSynced[id] = snap[id];
+      }
+      if (pendingState === s) pendingState = null;
+      syncMsg('All changes saved at ' + new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) + '.');
+    } catch (err) {
+      syncMsg(err.message + ' Your changes are kept and will be saved when it works again.', true);
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(flush, 15000);
+    }
+  }
+
+  api.refresh = async function () {
+    if (!api.active || pendingState) return;
+    try {
+      var g = await call('getFamily');
+      family = g.family; myRole = g.role; members = g.members || [];
+      var s = buildState(g.data);
+      lastSynced = snapshot(s);
+      writeCache(s);
+      opts.setState(s); opts.render(); showBar();
+      syncMsg('Up to date.');
+    } catch (err) { syncMsg(err.message, true); }
+  };
+
+  async function signOut() {
+    try { await call('logout'); } catch (e) {}
+    saveToken(null);
+    try { localStorage.removeItem(CACHE_KEY); } catch (e) {}
+    user = null; family = null; members = []; api.active = false; pendingState = null;
+    opts.setState(blankState()); opts.render();
+    var clear = $('clear-btn'); if (clear) clear.hidden = false;
+    showAuth('signin');
+  }
+
+  /* ---------- forms ---------- */
+  function fieldVal(form, name) { return String(form.elements[name].value || '').trim(); }
+
+  async function handleAuth(form) {
+    var mode = form.dataset.mode;
+    var msg = function (t) { var el = $('auth-msg'); if (el) el.textContent = t; };
+    msg('Please wait…');
+    try {
+      if (mode === 'confirm') {
+        var c = await call('confirm', { email: pendingEmail, code: fieldVal(form, 'code') });
+        saveToken(c.token); openFamily(); return;
+      }
+      if (mode === 'recover') {
+        var r = await call('resetPassword', { email: pendingEmail, code: fieldVal(form, 'code'), password: form.elements.password.value });
+        saveToken(r.token); openFamily(); return;
+      }
+      var email = fieldVal(form, 'email');
+      if (email) pendingEmail = email;
+      if (mode === 'reset') {
+        await call('requestReset', { email: email });
+        showAuth('recover', 'If this email has an account, a code has been sent. Enter it below.');
+        return;
+      }
+      var password = form.elements.password.value;
+      if (mode === 'signup') {
+        var name = fieldVal(form, 'name');
+        var su = await call('signup', { email: email, name: name, password: password });
+        if (su.needsConfirm) { showAuth('confirm', 'Account created. Enter the code we emailed you to finish.'); }
+        return;
+      }
+      var si = await call('login', { email: email, password: password });
+      saveToken(si.token); openFamily();
+    } catch (err) {
+      if (err.needsConfirm) { showAuth('confirm', err.message); return; }
+      msg(err.message);
+    }
+  }
+
+  async function handleSetup(form, kind) {
+    var msg = function (t) { var el = $('auth-msg'); if (el) el.textContent = t; };
+    msg('Please wait…');
+    try {
+      if (kind === 'create') await call('createFamily', { name: fieldVal(form, 'fname') });
+      else await call('joinFamily', { code: fieldVal(form, 'code') });
+      openFamily();
+    } catch (err) { msg(err.message); }
+  }
+
+  document.addEventListener('submit', function (e) {
+    if (!api.configured) return;
+    var f = e.target;
+    if (f.id === 'auth-form') { e.preventDefault(); handleAuth(f); }
+    if (f.id === 'create-form') { e.preventDefault(); handleSetup(f, 'create'); }
+    if (f.id === 'join-form') { e.preventDefault(); handleSetup(f, 'join'); }
+  });
+
+  document.addEventListener('click', async function (e) {
+    if (!api.configured) return;
+    var t = e.target.closest && e.target.closest('[data-act]');
+    if (!t) return;
+    e.preventDefault();
+    var act = t.getAttribute('data-act');
+    if (act === 'mode') { showAuth(t.getAttribute('data-mode')); return; }
+    if (act === 'signout') { signOut(); return; }
+    if (act === 'refresh') { api.refresh(); return; }
+    if (act === 'resend') {
+      var rmode = t.getAttribute('data-mode');
+      try { await call('resend', { email: pendingEmail, purpose: rmode === 'confirm' ? 'signup' : 'reset' }); } catch (err) {}
+      var m2 = $('auth-msg'); if (m2) m2.textContent = 'A new code has been sent if this email is registered.';
+      return;
+    }
+    if (act === 'newcode') {
+      try { var nc = await call('newCode'); family.join_code = nc.join_code; showBar(); syncMsg('New family code created. Share it only with new members.'); }
+      catch (err) { syncMsg(err.message, true); }
+      return;
+    }
+    if (act === 'remove') {
+      if (!confirm('Remove this member from the family? They will no longer see its data.')) return;
+      try { await call('removeMember', { email: t.getAttribute('data-email') }); api.refresh(); }
+      catch (err) { syncMsg(err.message, true); }
+    }
+  });
+
+  /* ---------- start ---------- */
+  api.start = function (o) {
+    opts = o;
+    if (!api.configured) { o.render(); return; }
+    o.render();
+    window.addEventListener('online', function () { if (pendingState) flush(); });
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') api.refresh();
+    });
+    try { token = localStorage.getItem(SESSION_KEY); } catch (e) { token = null; }
+    if (token) openFamily();
+    else showAuth('signin');
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
