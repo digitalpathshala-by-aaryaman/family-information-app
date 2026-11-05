@@ -4,5 +4,5 @@
 // 3. Deploy > New deployment > Web app: Execute as "Me", Who has access "Anyone". Copy the Web app URL.
 // 4. Paste that URL below. Leave it empty to run the app on this device only, without sign-in.
 window.APP_CONFIG = {
-  APPS_SCRIPT_URL: ''
+  APPS_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbzYwtkRzFXschi4tIvuPDpDiFk1NfNIQKgdKWIwJUvB8OVpaQowmnQouy5CZOCRErSI/exec'
 };
