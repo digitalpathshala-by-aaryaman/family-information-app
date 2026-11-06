@@ -6,7 +6,7 @@
   var cfg = global.APP_CONFIG || {};
   var SESSION_KEY = 'fib-session', CACHE_KEY = 'fib-cache';
   var KEYCHECK = 'keycheck', RECOVERY = 'recovery', CHECK_TEXT = 'family-book-check', PBKDF2_ITER = 200000;
-  var MIN_PASS = 12, MIN_PASSWORD = 8;
+  var MIN_PASS = 8, MIN_PASSWORD = 8;
   var CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   var api = { configured: !!cfg.APPS_SCRIPT_URL, active: false, start: null, push: null, refresh: null };
   global.CloudSync = api;
