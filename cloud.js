@@ -382,6 +382,8 @@
   }
 
   // Checks the passphrase against the family check value, then loads the book.
+  // If an earlier first-time setup stopped after saving keycheck, the admin can
+  // complete the missing recovery-code step without overwriting any records.
   async function unlock(pass, g) {
     var key = await deriveKey(pass, family.id);
     var kc = g.data && g.data[KEYCHECK];
@@ -389,6 +391,36 @@
     var check = null;
     try { check = await openValue(key, kc); } catch (e) { check = null; }
     if (check !== CHECK_TEXT) throw new Error('That passphrase is not correct for this family.');
+
+    // The keycheck is written first, so an interrupted initial setup can leave
+    // this recovery record absent. Complete it only after proving the passphrase.
+    if (myRole === 'admin' && !(g.data[RECOVERY] && g.data[RECOVERY].enc === 1)) {
+      var code = newRecoveryCode();
+      var renv = await sealRecovery(code, pass, family.id);
+      try {
+        var rr = await call('saveBlock', {
+          blockId: RECOVERY, data: renv, baseUpdatedAt: (g.times && g.times[RECOVERY]) || 0
+        });
+        g.data[RECOVERY] = renv;
+        g.times = Object.assign({}, g.times || {});
+        g.times[RECOVERY] = rr.savedAt;
+        pendingOpen = g;
+        // Never display a recovery code until the server confirms its save.
+        showRecoveryCode(code, function () { return unlock(pass, g); });
+        return;
+      } catch (err) {
+        if (!err.conflict) throw err;
+        // Another session may have completed the recovery step already.
+        var current = await call('getFamily');
+        pendingOpen = current;
+        if (current.data && current.data[RECOVERY] && current.data[RECOVERY].enc === 1) {
+          await unlock(pass, current);
+          return;
+        }
+        throw new Error('The recovery record changed during setup. Refresh and try again; your existing family data is safe.');
+      }
+    }
+
     var res = await decryptAll(g.data, key);
     keyObj = key;
     storePass(family.id, pass);
@@ -400,19 +432,59 @@
     if (res.legacy) api.push(s);
   }
 
-  // Admin sets the passphrase for the first time.
-  async function createPassphrase(pass, g) {
+  // Admin sets the family passphrase for the first time. Always re-read the
+  // server state first: pendingOpen may be stale and baseTimes is not loaded yet.
+  async function createPassphrase(pass) {
+    var g = await call('getFamily');
+    pendingOpen = g;
+    var existing = g.data && g.data[KEYCHECK];
+    if (existing && existing.enc === 1) {
+      // A previous attempt may already have saved keycheck, or another tab
+      // may have initialized the family. Do not overwrite its passphrase.
+      try { await unlock(pass, g); }
+      catch (err) {
+        if (err.message === 'That passphrase is not correct for this family.') {
+          showKeyScreen(g, 'A family passphrase is already set. Enter the existing passphrase to open this book.');
+          return;
+        }
+        throw err;
+      }
+      return;
+    }
+    // A malformed/older keycheck must never be silently overwritten.
+    if ((g.times && Number(g.times[KEYCHECK])) || existing) {
+      throw new Error('A passphrase record exists but cannot be read. Do not reset the family or delete its data; check the keycheck row in the Data sheet.');
+    }
     var key = await deriveKey(pass, family.id);
     var env = await sealValue(key, CHECK_TEXT);
-    var res = await call('saveBlock', { blockId: KEYCHECK, data: env, baseUpdatedAt: baseTimes[KEYCHECK] || 0 });
-    g.data = g.data || {}; g.times = Object.assign({}, g.times || {});
-    g.data[KEYCHECK] = env; g.times[KEYCHECK] = res.savedAt;
-    var code = newRecoveryCode();
-    var renv = await sealRecovery(code, pass, family.id);
-    var rr = await call('saveBlock', { blockId: RECOVERY, data: renv, baseUpdatedAt: (g.times[RECOVERY] || 0) });
-    g.data[RECOVERY] = renv; g.times[RECOVERY] = rr.savedAt;
-    // The book opens only after the family confirms they saved the recovery code.
-    showRecoveryCode(code, function () { return unlock(pass, g); });
+    try {
+      var saved = await call('saveBlock', { blockId: KEYCHECK, data: env, baseUpdatedAt: 0 });
+      g.data = g.data || {};
+      g.times = Object.assign({}, g.times || {});
+      g.data[KEYCHECK] = env;
+      g.times[KEYCHECK] = saved.savedAt;
+      pendingOpen = g;
+    } catch (err) {
+      if (!err.conflict) throw err;
+      // A second tab won the race. Open only with the correct existing passphrase.
+      var latest = await call('getFamily');
+      pendingOpen = latest;
+      if (latest.data && latest.data[KEYCHECK] && latest.data[KEYCHECK].enc === 1) {
+        try { await unlock(pass, latest); }
+        catch (unlockErr) {
+          if (unlockErr.message === 'That passphrase is not correct for this family.') {
+            showKeyScreen(latest, 'A family passphrase was set in another session. Enter that existing passphrase.');
+            return;
+          }
+          throw unlockErr;
+        }
+        return;
+      }
+      throw new Error('Family setup changed during saving. Refresh and try again. No existing data was overwritten.');
+    }
+    // A recovery-code save may fail temporarily. If it does, a later unlock
+    // with the same passphrase will safely resume the missing step.
+    await unlock(pass, g);
   }
 
   async function handleRecoveryCodeSaved(form) {
@@ -574,14 +646,22 @@
 
   async function handleKey(form) {
     var msg = function (t) { var el = $('auth-msg'); if (el) el.textContent = t; };
+    if (form.dataset.busy === '1') return; // Prevent two simultaneous setup submissions.
     var mode = form.dataset.mode, pass = form.elements.pass.value;
     if (pass.length < MIN_PASS) { msg('Use at least ' + MIN_PASS + ' characters.'); return; }
     if (mode === 'create' && form.elements.pass2.value !== pass) { msg('The two passphrases do not match.'); return; }
+    form.dataset.busy = '1';
+    var button = form.querySelector && form.querySelector('button[type="submit"]');
+    if (button) button.disabled = true;
     msg('Please wait…');
     try {
-      if (mode === 'create') await createPassphrase(pass, pendingOpen);
+      if (mode === 'create') await createPassphrase(pass);
       else await unlock(pass, pendingOpen);
     } catch (err) { msg(err.message); }
+    finally {
+      form.dataset.busy = '0';
+      if (button) button.disabled = false;
+    }
   }
 
   async function handleChangePass(form) {
