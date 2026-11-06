@@ -321,12 +321,15 @@ function saveBlock(b) {
   if (json.length > MAX_CELL) fail('This section has too many entries for one save. Remove a few rows or split them.');
   var fid = m.family.family_id;
   var row = findRow(SHEET.data, { family_id: fid, block_id: block });
-  // Refuse to overwrite a section that someone else changed after this device last loaded it.
+  // Optimistic concurrency: only accept the exact version the client read.
+  // This also protects records created since the client last refreshed.
   var base = Number(b.baseUpdatedAt) || 0;
-  if (row && Number(row.obj.updated_at) > base) {
-    return { ok: false, conflict: true, error: 'Someone in your family changed this section first, so your last change was not saved. The latest version is now shown. Please enter your change again.' };
+  var current = row ? (Number(row.obj.updated_at) || 0) : 0;
+  if (base !== current) {
+    return { ok: false, conflict: true, error: 'This section changed since it was opened. Refresh to see the latest saved version before making changes again.' };
   }
-  var now = Date.now();
+  // Versions must advance even when two writes occur within one millisecond.
+  var now = Math.max(Date.now(), current + 1);
   var rec = { family_id: fid, block_id: block, json: json, updated_by: s.email, updated_at: now };
   if (row) updateRow(SHEET.data, row.row, rec); else appendRow(SHEET.data, rec);
   return { ok: true, savedAt: now };
