@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1d6b58">
+<meta name="description" content="A family information book for Indian households: bank accounts, FDs, investments, insurance, nominees and emergency details in one place.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<title>Family Information Book</title>
+<style>
+:root{
+  --bg:#f5f6f8;--card:#ffffff;--ink:#1c2230;--muted:#5d6676;--line:#dde2ea;
+  --accent:#1d6b58;--accent-soft:#e6f2ee;--warn:#8a4500;--danger:#b42318;--danger-soft:#fdeeec;
+  --radius:12px;color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1216;--card:#171c23;--ink:#e6eaf0;--muted:#9aa3b1;--line:#2a313c;
+    --accent:#5cc2a6;--accent-soft:#1b2d28;--warn:#f0b35a;--danger:#ff8a80;--danger-soft:#2c1715;color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1216;--card:#171c23;--ink:#e6eaf0;--muted:#9aa3b1;--line:#2a313c;
+  --accent:#5cc2a6;--accent-soft:#1b2d28;--warn:#f0b35a;--danger:#ff8a80;--danger-soft:#2c1715;color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{background:var(--bg)}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);}
+h1{font-size:22px;margin:0;line-height:1.2}
+h2{font-size:18px;margin:30px 0 8px;scroll-margin-top:110px}
+h3{font-size:16px;margin:0}
+p{margin:4px 0}
+.top{display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;align-items:center;padding:16px 0 10px}
+.top p{color:var(--muted);font-size:13px;margin:2px 0 0}
+.tools{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.jump{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);
+  display:flex;gap:6px;overflow-x:auto;padding:8px 0;margin:0 -16px;padding-left:16px;padding-right:16px;border-bottom:1px solid var(--line);white-space:nowrap}
+.jump a{color:var(--ink);text-decoration:none;font-size:13px;padding:6px 11px;border:1px solid var(--line);border-radius:999px;background:var(--card)}
+.jump a:hover,.jump a:focus-visible{border-color:var(--accent);color:var(--accent);outline:none}
+main{max-width:1100px;margin:0 auto;padding-bottom:40px}
+.sec{padding-top:4px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin:12px 0;min-width:0}
+.hint{color:var(--muted);font-size:13px;margin:2px 0 10px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:12px 0}
+a.stat{display:block;text-decoration:none;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px;min-width:0}
+a.stat:hover,a.stat:focus-visible{border-color:var(--accent);outline:none}
+.stat .n{font-size:22px;font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums}
+.stat .t{font-size:13px;font-weight:600;margin-top:2px}
+.stat .s{font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.stat .u{font-size:11px;color:var(--muted);margin-top:4px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.two>.card{margin:0}
+@media (max-width:760px){.two{grid-template-columns:1fr}}
+.grid-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+.fld{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted);min-width:0}
+.fld.wide{grid-column:1/-1}
+input,select,textarea{font:inherit;font-size:14px;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 10px;width:100%;min-width:0;min-height:40px}
+textarea{resize:vertical}
+input:focus,select:focus,textarea:focus,button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.tscroll{overflow-x:auto;margin-top:6px}
+table{border-collapse:collapse;width:100%;min-width:640px}
+th{font-size:12px;text-align:left;color:var(--muted);font-weight:600;padding:6px 6px 6px 0;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:6px 6px 6px 0;vertical-align:top;min-width:130px}
+.actcol{width:170px;min-width:0;white-space:nowrap}
+.actcol button+button{margin-left:4px}
+button,.btn{font:inherit;font-size:14px;cursor:pointer;border-radius:8px;padding:9px 14px;border:1px solid var(--accent);background:var(--accent);color:#fff;text-decoration:none;display:inline-block;min-height:40px}
+button.ghost,.btn.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
+button.danger{color:var(--danger);border-color:var(--danger)}
+button.add{margin-top:10px;background:transparent;color:var(--accent);border-style:dashed}
+button.row-act{padding:6px 10px;font-size:13px;min-height:32px;background:transparent;color:var(--ink);border-color:var(--line)}
+button.row-act.del{color:var(--danger)}
+.empty{color:var(--muted);font-style:italic;margin:6px 0}
+.row-item{display:flex;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font-size:14px;flex-wrap:wrap}
+.row-item small{color:var(--muted)}
+.over{color:var(--danger);font-weight:600;white-space:nowrap}
+.soon{color:var(--warn);font-weight:600;white-space:nowrap}
+.due{white-space:nowrap;font-variant-numeric:tabular-nums}
+table.bank{min-width:0}
+table.bank td,table.bank th{min-width:0;padding-right:12px}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.upd{font-size:12px;color:var(--muted);margin-top:6px}
+.stale{color:var(--warn)}
+ul.todo{margin:6px 0 0;padding-left:20px}
+ul.todo li{margin:5px 0}
+details{border-bottom:1px solid var(--line);padding:10px 0}
+summary{cursor:pointer;font-weight:600;min-height:32px}
+details ul{margin:6px 0 0;padding-left:20px}
+details li{margin:4px 0}
+.check label{display:flex;gap:10px;align-items:flex-start;padding:6px 0;font-size:14px}
+.check input{width:auto;min-height:0;margin-top:4px}
+.sheet{border:2px solid var(--ink);border-radius:10px;padding:16px;background:var(--card);max-width:640px}
+.sheet h3{font-size:20px;margin-bottom:8px}
+.sheet h4{margin:14px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--accent)}
+.sheet dl{display:grid;grid-template-columns:150px minmax(0,1fr);gap:4px 12px;margin:0}
+.sheet dt{color:var(--muted);font-size:13px}
+.sheet dd{margin:0;font-weight:500;overflow-wrap:anywhere}
+.sheet .nums{font-size:14px;font-variant-numeric:tabular-nums}
+@media (max-width:520px){.sheet dl{grid-template-columns:1fr}.sheet dt{margin-top:6px}}
+#status{font-size:13px;color:var(--accent);min-height:20px;margin-top:6px}
+#install-btn[hidden]{display:none}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+footer{color:var(--muted);font-size:12px;border-top:1px solid var(--line);padding:14px 0 28px}
+/* Phone layout: each table row becomes a stacked card */
+@media (max-width:640px){
+  table.entry{min-width:0}
+  table.entry thead{display:none}
+  table.entry, table.entry tbody, table.entry tr, table.entry td{display:block;width:100%}
+  table.entry tr{border:1px solid var(--line);border-radius:10px;padding:10px;margin:10px 0;background:var(--bg)}
+  table.entry td{min-width:0;padding:4px 0;display:grid;grid-template-columns:42% 1fr;gap:8px;align-items:center}
+  table.entry td::before{content:attr(data-label);font-size:12px;color:var(--muted)}
+  table.entry td.actcol{display:flex;gap:6px;justify-content:flex-end;margin-top:6px}
+  table.entry td.actcol::before{content:none}
+  table.entry td.actcol{display:flex}
+  .actcol{width:auto}
+}
+
+/* sign-in and family bar */
+.cloud-bar{background:var(--card);border-bottom:1px solid var(--line);margin:0 -16px;padding:10px 16px}
+.cloud-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:center;font-size:14px}
+.cloud-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.cloud-actions details{font-size:14px}
+.cloud-actions summary{cursor:pointer;color:var(--accent);font-weight:600}
+ul.members{margin:6px 0;padding-left:18px}
+ul.members li{margin:4px 0}
+.code{font-family:ui-monospace,Menlo,Consolas,monospace;letter-spacing:.08em}
+#cloud-auth{position:fixed;inset:0;z-index:50;background:var(--bg);overflow-y:auto;
+  padding:max(16px,env(safe-area-inset-top,0px)) max(16px,env(safe-area-inset-right,0px)) max(16px,env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
+#cloud-auth[hidden],#cloud-bar[hidden]{display:none}
+.auth-card{max-width:420px;margin:24px auto;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:22px}
+.auth-card h2{font-size:20px;margin:0 0 6px}
+.auth-card h3{font-size:15px;margin:0 0 8px}
+.auth-card form{display:flex;flex-direction:column;gap:12px;margin-top:12px}
+.setup-form{border-top:1px solid var(--line);padding-top:14px;margin-top:16px}
+.auth-tabs{display:flex;gap:8px;margin:14px 0 4px}
+.auth-tabs button{flex:1;background:transparent;color:var(--ink);border-color:var(--line)}
+.auth-tabs button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.auth-go{width:100%}
+.auth-go.ghost{background:transparent;color:var(--accent)}
+.auth-links{text-align:center;font-size:14px;margin-top:12px}
+.auth-links a{color:var(--accent)}
+.auth-msg{font-size:14px;color:var(--danger);min-height:20px;margin:12px 0 0}
+@media print{ .no-print{display:none!important} }
+</style>
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1>Family Information Book</h1>
+    <p>One place for the whole family. Sign in to sync across your family's devices. Do not enter bank passwords, PINs or OTPs here.</p>
+  </div>
+  <div class="tools no-print">
+    <button type="button" id="install-btn" class="ghost" hidden>Install app</button>
+    <a class="btn ghost" href="template/Family-Information-Book-Template.xlsx" download>Excel template</a>
+    <label class="btn ghost" for="xlsx-file">Import Excel</label>
+    <input type="file" id="xlsx-file" accept=".xlsx" hidden>
+    <button type="button" class="ghost" id="backup-btn">Save backup</button>
+    <label class="btn ghost" for="backup-file">Restore backup</label>
+    <input type="file" id="backup-file" accept="application/json,.json" hidden>
+    <button type="button" class="ghost danger" id="clear-btn">Clear all</button>
+  </div>
+</header>
+<div id="status" role="status" aria-live="polite"></div>
+<div id="cloud-bar" class="cloud-bar" hidden></div>
+<div id="cloud-auth" hidden></div>
+<nav class="jump no-print" id="jump" aria-label="Sections"></nav>
+<main id="main"></main>
+<footer>General information only. For claims and legal steps, confirm with the institution, your Chartered Accountant or a lawyer. Emergency number: 112.</footer>
+<script src="config.js"></script>
+<script src="data.js"></script>
+<script src="xlsx-reader.js"></script>
+<script src="cloud.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
